@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { addDays, format, parseISO, differenceInDays } from 'date-fns';
+import { format, parseISO } from 'date-fns';
 import { zhTW } from 'date-fns/locale';
 
 // --- 資料模型 ---
@@ -39,29 +39,119 @@ const TagBadge = ({ tag }: { tag: string }) => {
   );
 };
 
+// Google Maps 導航連結
+const getGoogleMapsUrl = (from: { name: string; lat?: number; lng?: number } | null, to: { name: string; lat?: number; lng?: number }) => {
+  if (from && to.lat && to.lng && from.lat && from.lng) {
+    // 使用座標導航
+    return `https://www.google.com/maps/dir/?api=1&origin=${from.lat},${from.lng}&destination=${to.lat},${to.lng}&travelmode=transit`;
+  } else if (to.lat && to.lng) {
+    // 只使用目的地座標
+    return `https://www.google.com/maps/dir/?api=1&destination=${to.lat},${to.lng}&travelmode=transit`;
+  } else {
+    // 使用名稱搜尋
+    const dest = encodeURIComponent(to.name + ' 日本');
+    return `https://www.google.com/maps/dir/?api=1&destination=${dest}&travelmode=transit`;
+  }
+};
+
 export default function Home() {
   const [itinerary, setItinerary] = useState<Itinerary | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeDay, setActiveDay] = useState(1);
   const [activeBudgetCategory, setActiveBudgetCategory] = useState<string | null>(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editingStop, setEditingStop] = useState<{ dayIndex: number; stopIndex: number } | null>(null);
 
-  // 📱 Android 版：直接讀取本地 JSON
+  // 📱 Android 版：讀取本地 JSON + LocalStorage
   useEffect(() => {
-    fetch('/data.json')
-      .then(res => res.json())
-      .then((data: Itinerary) => {
-        // 排序每天的行程
-        data.days.forEach(day => {
-          if (day.stops) day.stops.sort((a, b) => a.time.localeCompare(b.time));
-        });
+    const loadData = async () => {
+      try {
+        // 先嘗試從 LocalStorage 讀取
+        const savedData = localStorage.getItem('tohoku_trip_data');
+        if (savedData) {
+          const data = JSON.parse(savedData) as Itinerary;
+          sortStops(data);
+          setItinerary(data);
+          setLoading(false);
+          return;
+        }
+
+        // 否則讀取預設 JSON
+        const res = await fetch('/data.json');
+        const data = await res.json() as Itinerary;
+        sortStops(data);
         setItinerary(data);
         setLoading(false);
-      })
-      .catch(err => {
+      } catch (err) {
         console.error('載入失敗:', err);
         setLoading(false);
-      });
+      }
+    };
+    loadData();
   }, []);
+
+  // 儲存到 LocalStorage
+  const saveData = (data: Itinerary) => {
+    localStorage.setItem('tohoku_trip_data', JSON.stringify(data));
+  };
+
+  // 排序行程
+  const sortStops = (data: Itinerary) => {
+    data.days.forEach(day => {
+      if (day.stops) day.stops.sort((a, b) => a.time.localeCompare(b.time));
+    });
+  };
+
+  // 更新行程
+  const updateItinerary = (newItinerary: Itinerary) => {
+    sortStops(newItinerary);
+    setItinerary(newItinerary);
+    saveData(newItinerary);
+  };
+
+  // 編輯行程點
+  const handleStopChange = (dayIndex: number, stopIndex: number, field: keyof Stop, value: any) => {
+    if (!itinerary) return;
+    const newItinerary = { ...itinerary };
+    (newItinerary.days[dayIndex].stops[stopIndex] as any)[field] = value;
+    updateItinerary(newItinerary);
+  };
+
+  // 刪除行程點
+  const handleDeleteStop = (dayIndex: number, stopIndex: number) => {
+    if (!itinerary || !confirm('確定要刪除這個行程嗎？')) return;
+    const newItinerary = { ...itinerary };
+    newItinerary.days[dayIndex].stops.splice(stopIndex, 1);
+    updateItinerary(newItinerary);
+  };
+
+  // 新增行程點
+  const handleAddStop = (dayIndex: number) => {
+    if (!itinerary) return;
+    const newItinerary = { ...itinerary };
+    const defaultCurr = itinerary.trip_meta.destination_currency || 'JPY';
+    const newStop: Stop = { 
+      time: "12:00", 
+      name: "新景點", 
+      description: "", 
+      transport: "", 
+      cost: 0, 
+      currency: defaultCurr,
+      tags: []
+    };
+    newItinerary.days[dayIndex].stops.push(newStop);
+    updateItinerary(newItinerary);
+  };
+
+  // 重設為預設資料
+  const handleReset = async () => {
+    if (!confirm('確定要重設為預設行程嗎？所有修改將會遺失。')) return;
+    localStorage.removeItem('tohoku_trip_data');
+    const res = await fetch('/data.json');
+    const data = await res.json() as Itinerary;
+    sortStops(data);
+    setItinerary(data);
+  };
 
   const formatMoney = (cost: number, currencyCode?: string) => {
     if (!itinerary) return `¥${cost.toLocaleString()}`;
@@ -123,7 +213,8 @@ export default function Home() {
   if (loading) return <div className="p-10 text-center">載入中...⏳</div>;
   if (!itinerary) return <div className="p-10 text-center text-red-500">載入失敗😢</div>;
 
-  const currentDayData = itinerary.days.find(d => d.dayNumber === activeDay);
+  const currentDayIndex = itinerary.days.findIndex(d => d.dayNumber === activeDay);
+  const currentDayData = itinerary.days[currentDayIndex];
   const budgetData = activeBudgetCategory ? getBudgetDetails(activeBudgetCategory) : null;
   const homeCurr = itinerary.trip_meta.home_currency || 'TWD';
 
@@ -131,9 +222,27 @@ export default function Home() {
     <main className="min-h-screen pb-20 bg-gradient-to-br from-pink-50 to-purple-50">
       {/* Header */}
       <header className="sticky top-0 z-50 bg-white/90 backdrop-blur shadow-sm">
-        <div className="px-4 py-3">
-          <h1 className="text-lg font-bold text-pink-600 truncate">{itinerary.trip_meta.title}</h1>
-          <p className="text-xs text-gray-500">{itinerary.trip_meta.location} · {itinerary.trip_meta.days_count}天</p>
+        <div className="px-4 py-3 flex justify-between items-center">
+          <div>
+            <h1 className="text-lg font-bold text-pink-600 truncate">{itinerary.trip_meta.title}</h1>
+            <p className="text-xs text-gray-500">{itinerary.trip_meta.location} · {itinerary.trip_meta.days_count}天</p>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setIsEditing(!isEditing)}
+              className={`px-3 py-1 rounded-full text-sm font-bold ${isEditing ? 'bg-red-100 text-red-600' : 'bg-pink-100 text-pink-600'}`}
+            >
+              {isEditing ? '完成' : '編輯'}
+            </button>
+            {isEditing && (
+              <button
+                onClick={handleReset}
+                className="px-3 py-1 rounded-full text-sm font-bold bg-gray-100 text-gray-600"
+              >
+                重設
+              </button>
+            )}
+          </div>
         </div>
       </header>
 
@@ -215,51 +324,133 @@ export default function Home() {
 
             {/* 行程列表 */}
             <div className="p-4 space-y-4">
-              {currentDayData.stops.map((stop, idx) => (
-                <div key={idx} className="relative pl-6 border-l-2 border-pink-200">
-                  <div className="absolute -left-[9px] top-1 w-4 h-4 bg-pink-500 rounded-full border-2 border-white"></div>
-                  
-                  <div className="text-xs text-gray-500 font-mono mb-1">{stop.time}</div>
-                  
-                  <h3 className="font-bold text-gray-800">{stop.name}</h3>
-                  
-                  {/* 標籤 */}
-                  {stop.tags && stop.tags.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-2">
-                      {stop.tags.map((tag, tidx) => <TagBadge key={tidx} tag={tag} />)}
-                    </div>
-                  )}
-                  
-                  {/* 交通 */}
-                  {stop.transport && (
-                    <div className="mt-2 text-sm text-orange-600 bg-orange-50 px-2 py-1 rounded inline-block">
-                      🚃 {stop.transport}
-                    </div>
-                  )}
-                  
-                  {/* 描述 */}
-                  {stop.description && (
-                    <p className="mt-2 text-sm text-gray-600">{stop.description}</p>
-                  )}
-                  
-                  {/* 費用 */}
-                  {stop.cost > 0 && (
-                    <div className="mt-2">{formatMoney(stop.cost, stop.currency)}</div>
-                  )}
-                  
-                  {/* 地圖連結 */}
-                  {stop.lat && stop.lng && (
-                    <a
-                      href={`https://maps.google.com/?q=${stop.lat},${stop.lng}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="mt-2 inline-flex items-center gap-1 text-sm text-blue-600 bg-blue-50 px-3 py-1 rounded-full"
-                    >
-                      📍 開啟地圖
-                    </a>
-                  )}
-                </div>
-              ))}
+              {currentDayData.stops.map((stop, stopIndex) => {
+                const prevStop = stopIndex > 0 ? currentDayData.stops[stopIndex - 1] : null;
+                const mapUrl = getGoogleMapsUrl(prevStop, stop);
+                
+                return (
+                  <div key={stopIndex} className="relative pl-6 border-l-2 border-pink-200">
+                    <div className="absolute -left-[9px] top-1 w-4 h-4 bg-pink-500 rounded-full border-2 border-white"></div>
+                    
+                    {/* 編輯模式 */}
+                    {isEditing && editingStop?.dayIndex === currentDayIndex && editingStop?.stopIndex === stopIndex ? (
+                      <div className="bg-gray-50 p-3 rounded-lg space-y-2">
+                        <input
+                          type="text"
+                          value={stop.time}
+                          onChange={(e) => handleStopChange(currentDayIndex, stopIndex, 'time', e.target.value)}
+                          className="w-full p-2 border rounded text-sm"
+                          placeholder="時間"
+                        />
+                        <input
+                          type="text"
+                          value={stop.name}
+                          onChange={(e) => handleStopChange(currentDayIndex, stopIndex, 'name', e.target.value)}
+                          className="w-full p-2 border rounded text-sm"
+                          placeholder="地點名稱"
+                        />
+                        <input
+                          type="text"
+                          value={stop.description || ''}
+                          onChange={(e) => handleStopChange(currentDayIndex, stopIndex, 'description', e.target.value)}
+                          className="w-full p-2 border rounded text-sm"
+                          placeholder="描述"
+                        />
+                        <input
+                          type="text"
+                          value={stop.transport || ''}
+                          onChange={(e) => handleStopChange(currentDayIndex, stopIndex, 'transport', e.target.value)}
+                          className="w-full p-2 border rounded text-sm"
+                          placeholder="交通方式"
+                        />
+                        <div className="flex gap-2">
+                          <input
+                            type="number"
+                            value={stop.cost}
+                            onChange={(e) => handleStopChange(currentDayIndex, stopIndex, 'cost', parseInt(e.target.value) || 0)}
+                            className="flex-1 p-2 border rounded text-sm"
+                            placeholder="費用"
+                          />
+                          <button
+                            onClick={() => setEditingStop(null)}
+                            className="px-3 py-2 bg-pink-500 text-white rounded text-sm"
+                          >
+                            完成
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex justify-between items-start">
+                          <div className="text-xs text-gray-500 font-mono mb-1">{stop.time}</div>
+                          {isEditing && (
+                            <div className="flex gap-1">
+                              <button
+                                onClick={() => setEditingStop({ dayIndex: currentDayIndex, stopIndex })}
+                                className="text-xs px-2 py-1 bg-blue-100 text-blue-600 rounded"
+                              >
+                                編輯
+                              </button>
+                              <button
+                                onClick={() => handleDeleteStop(currentDayIndex, stopIndex)}
+                                className="text-xs px-2 py-1 bg-red-100 text-red-600 rounded"
+                              >
+                                刪除
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                        
+                        <h3 className="font-bold text-gray-800">{stop.name}</h3>
+                        
+                        {/* 標籤 */}
+                        {stop.tags && stop.tags.length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-2">
+                            {stop.tags.map((tag, tidx) => <TagBadge key={tidx} tag={tag} />)}
+                          </div>
+                        )}
+                        
+                        {/* 交通 */}
+                        {stop.transport && (
+                          <div className="mt-2 text-sm text-orange-600 bg-orange-50 px-2 py-1 rounded inline-block">
+                            🚃 {stop.transport}
+                          </div>
+                        )}
+                        
+                        {/* 描述 */}
+                        {stop.description && (
+                          <p className="mt-2 text-sm text-gray-600">{stop.description}</p>
+                        )}
+                        
+                        {/* 費用 */}
+                        {stop.cost > 0 && (
+                          <div className="mt-2">{formatMoney(stop.cost, stop.currency)}</div>
+                        )}
+                        
+                        {/* 導航連結 */}
+                        <a
+                          href={mapUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="mt-2 inline-flex items-center gap-1 text-sm text-blue-600 bg-blue-50 px-3 py-1 rounded-full"
+                        >
+                          📍 {prevStop ? `從 ${prevStop.name} 導航` : '查看地圖'}
+                        </a>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+              
+              {/* 新增行程按鈡 */}
+              {isEditing && (
+                <button
+                  onClick={() => handleAddStop(currentDayIndex)}
+                  className="w-full p-3 border-2 border-dashed border-pink-300 rounded-xl text-pink-600 font-bold text-sm"
+                >
+                  + 新增行程點
+                </button>
+              )}
             </div>
           </div>
         </div>
